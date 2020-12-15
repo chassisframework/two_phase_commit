@@ -104,12 +104,26 @@ defmodule TwoPhaseCommit do
   @doc """
   Moves the transaction to the voting phase.
   """
-  @spec prepare(t) :: t | no_return
+  @spec prepare(t) :: {:ok, t} | {:error, any()}
   def prepare(%__MODULE__{state: :interactive, participants: participants} = two_phase_commit) do
     if MapSet.size(participants) > 1 do
-      %__MODULE__{two_phase_commit | state: {:voting, participants}}
+      {:ok, %__MODULE__{two_phase_commit | state: {:voting, participants}}}
     else
-      raise "must have at least two participants to move into the voting phase"
+      {:error, :too_few_participants}
+    end
+  end
+
+  @doc """
+  Moves the transaction to the voting phase. Raises an error when there aren't enough participants.
+  """
+  @spec prepare!(t) :: t | no_return()
+  def prepare!(%__MODULE__{} = two_phase_commit) do
+    case prepare(two_phase_commit) do
+      {:ok, two_phase_commit} ->
+        two_phase_commit
+
+      {:error, _} ->
+        raise "too few participants, must have at least two."
     end
   end
 

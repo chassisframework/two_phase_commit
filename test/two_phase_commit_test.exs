@@ -24,17 +24,23 @@ defmodule TwoPhaseCommitTest do
 
     property "prepare/1 moves to voting phase" do
       forall txn <- transaction() do
-        txn = TwoPhaseCommit.prepare(txn)
+        {:ok, txn} = TwoPhaseCommit.prepare(txn)
 
         assert %TwoPhaseCommit{state: {:voting, voting}} = txn
         assert MapSet.to_list(voting) == TwoPhaseCommit.participants(txn)
       end
     end
 
-    property "prepare/1 raises when there aren't enough participants" do
+    property "prepare/1 returns an error when there aren't enough participants" do
+      forall txn <- transaction_with_too_few_participants() do
+        assert {:error, :too_few_participants} == TwoPhaseCommit.prepare(txn)
+      end
+    end
+
+    property "prepare!/1 raises an error when there aren't enough participants" do
       forall txn <- transaction_with_too_few_participants() do
         assert_raise(RuntimeError, ~r/at least two/, fn ->
-          TwoPhaseCommit.prepare(txn)
+          TwoPhaseCommit.prepare!(txn)
         end)
 
         true
@@ -45,7 +51,7 @@ defmodule TwoPhaseCommitTest do
   describe "voting phase" do
     property "next_actions/1 indicates that participants should vote" do
       forall txn <- transaction() do
-        txn = TwoPhaseCommit.prepare(txn)
+        txn = TwoPhaseCommit.prepare!(txn)
 
         assert TwoPhaseCommit.next_action(txn) == {:vote, TwoPhaseCommit.participants(txn)}
       end
@@ -57,7 +63,7 @@ defmodule TwoPhaseCommitTest do
 
         txn =
           txn
-          |> TwoPhaseCommit.prepare()
+          |> TwoPhaseCommit.prepare!()
           |> TwoPhaseCommit.prepared(prepared)
 
         assert %TwoPhaseCommit{state: {:voting, voting}} = txn
@@ -71,7 +77,7 @@ defmodule TwoPhaseCommitTest do
 
         txn =
           txn
-          |> TwoPhaseCommit.prepare()
+          |> TwoPhaseCommit.prepare!()
           |> all_prepared(participants)
 
         assert %TwoPhaseCommit{state: {:committing, committing}} = txn
@@ -87,7 +93,7 @@ defmodule TwoPhaseCommitTest do
 
         txn =
           txn
-          |> TwoPhaseCommit.prepare()
+          |> TwoPhaseCommit.prepare!()
           |> all_prepared(rest)
           |> TwoPhaseCommit.aborted(will_abort)
 
@@ -102,7 +108,7 @@ defmodule TwoPhaseCommitTest do
 
         txn =
           txn
-          |> TwoPhaseCommit.prepare()
+          |> TwoPhaseCommit.prepare!()
           |> TwoPhaseCommit.prepared(prepared)
           |> all_aborted(rest)
 
@@ -117,7 +123,7 @@ defmodule TwoPhaseCommitTest do
 
         txn =
           txn
-          |> TwoPhaseCommit.prepare()
+          |> TwoPhaseCommit.prepare!()
           |> all_prepared(rest)
           |> TwoPhaseCommit.aborted(will_abort)
 
@@ -131,7 +137,7 @@ defmodule TwoPhaseCommitTest do
 
         txn =
           txn
-          |> TwoPhaseCommit.prepare()
+          |> TwoPhaseCommit.prepare!()
           |> all_prepared(rest)
           |> TwoPhaseCommit.aborted(will_abort)
           |> all_rolled_back(participants)
@@ -150,7 +156,7 @@ defmodule TwoPhaseCommitTest do
 
         txn =
           txn
-          |> TwoPhaseCommit.prepare()
+          |> TwoPhaseCommit.prepare!()
           |> all_prepared(participants)
 
         assert TwoPhaseCommit.next_action(txn) == {:commit, participants}
@@ -163,7 +169,7 @@ defmodule TwoPhaseCommitTest do
 
         txn =
           txn
-          |> TwoPhaseCommit.prepare()
+          |> TwoPhaseCommit.prepare!()
           |> all_prepared(participants)
           |> TwoPhaseCommit.committed(will_commit)
 
@@ -178,7 +184,7 @@ defmodule TwoPhaseCommitTest do
 
         txn =
           txn
-          |> TwoPhaseCommit.prepare()
+          |> TwoPhaseCommit.prepare!()
           |> all_prepared(participants)
           |> all_committed(participants)
 
