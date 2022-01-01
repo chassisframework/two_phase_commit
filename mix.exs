@@ -35,8 +35,8 @@ defmodule TwoPhaseCommit.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:propcheck, "~> 1.2", only: [:test, :dev]},
-      {:dialyxir, "~> 1.0.0", only: [:dev], runtime: false},
+      {:propcheck, "~> 1.4", only: [:test, :dev]},
+      {:dialyxir, "~> 1.1.0", only: [:dev], runtime: false},
       {:ex_doc, ">= 0.0.0", only: :dev, runtime: false}
     ]
   end

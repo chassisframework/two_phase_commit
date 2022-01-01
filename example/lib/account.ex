@@ -58,7 +58,7 @@ defmodule Account do
 
   @impl true
   def handle_cast({:prepare, coordinator}, %State{coordinator: coordinator} = state) do
-    if :rand.normal > 0 do
+    if :rand.normal() > 0 do
       Logger.info "Account #{inspect self()} voting to abort."
 
       Coordinator.aborted(coordinator, self())

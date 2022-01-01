@@ -33,16 +33,13 @@ defmodule TwoPhaseCommit.Generators do
   end
 
   def participant do
-    any()
+    let participant_id <- any() do
+      %TestParticipant{id: participant_id}
+    end
   end
 
-  def id do
-    any()
-  end
-
-  def client do
-    any()
-  end
+  def id, do: any()
+  def client, do: any()
 
 
   defp unique_list_of(generator, current_things, unique_by \\ &(&1)) do

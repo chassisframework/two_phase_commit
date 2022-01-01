@@ -4,11 +4,13 @@ defmodule TwoPhaseCommit do
   next steps to be taken in the case of a coordinator recovery after a crash.
   """
 
+  alias TwoPhaseCommit.Participant
+
   @type id :: any
   @type client :: any
-  @type participant :: any
-  @type participants :: [participant]
-  @type state :: :interactive | {:voting | :rolling_back | :committing, MapSet.t(participant)} | :aborted | :committed
+  @type participant_ids :: [Participant.id()]
+  @type participants :: %{Participant.id() => Participant.t()}
+  @type state :: :interactive | {:voting | :rolling_back | :committing, participant_ids} | :aborted | :committed
   @type next_action :: :write_data | {:vote | :roll_back | :commit, participants} | nil
 
   @type opt :: {:client, client} | {:id, id}
@@ -18,14 +20,14 @@ defmodule TwoPhaseCommit do
     id: id,
     client: client,
     state: state,
-    participants: MapSet.t()
+    participants: participants()
   }
 
   defstruct [
     :id,
     :client,
     state: :interactive,
-    participants: MapSet.new()
+    participants: %{}
   ]
 
 
@@ -37,26 +39,27 @@ defmodule TwoPhaseCommit do
   `:id` - stores the transaction id (globally unique)
   `:client` - stores an arbitrary identifying the requesting entity (a pid, etc)
   """
-  @spec new(participants, opts) :: t
+  @spec new([Participant.t()], opts) :: t
   def new(participants, opts \\ []) when is_list(participants) and is_list(opts) do
     id = Keyword.get(opts, :id, nil)
     client = Keyword.get(opts, :client, nil)
+    participants = Map.new(participants, fn participant -> {Participant.id(participant), participant} end)
 
     %__MODULE__{
       id: id,
       client: client,
-      participants: MapSet.new(participants)
+      participants: participants
     }
   end
 
   @doc """
   Adds a participant to the transaction while it's in the interactive phase.
   """
-  @spec add_participant(t, participant) :: t
+  @spec add_participant(t, Participant.t()) :: t
   def add_participant(%__MODULE__{participants: participants, state: :interactive} = two_phase_commit, participant) do
     %__MODULE__{
       two_phase_commit |
-      participants: MapSet.put(participants, participant)
+      participants: Map.put(participants, Participant.id(participant), participant)
     }
   end
 
@@ -68,9 +71,9 @@ defmodule TwoPhaseCommit do
   @doc """
   Returns a list of all participants.
   """
-  @spec participants(t) :: participants
+  @spec participants(t) :: [Participant.t()]
   def participants(%__MODULE__{participants: participants}) do
-    MapSet.to_list(participants)
+    Map.values(participants)
   end
 
 
@@ -82,19 +85,19 @@ defmodule TwoPhaseCommit do
   """
   @spec next_action(t) :: next_action
   def next_action(%__MODULE__{state: :interactive}) do
-    :write_data
+    :prepare
   end
 
-  def next_action(%__MODULE__{state: {:voting, awaiting_acknowledgement}}) do
-    {:vote, MapSet.to_list(awaiting_acknowledgement)}
+  def next_action(%__MODULE__{state: {:voting, awaiting_vote_ids}, participants: participants}) do
+    {:vote, participants_for_ids(awaiting_vote_ids, participants)}
   end
 
-  def next_action(%__MODULE__{state: {:rolling_back, awaiting_acknowledgement}}) do
-    {:roll_back, MapSet.to_list(awaiting_acknowledgement)}
+  def next_action(%__MODULE__{state: {:rolling_back, awaiting_rollback_ids}, participants: participants}) do
+    {:roll_back, participants_for_ids(awaiting_rollback_ids, participants)}
   end
 
-  def next_action(%__MODULE__{state: {:committing, awaiting_acknowledgement}}) do
-    {:commit, MapSet.to_list(awaiting_acknowledgement)}
+  def next_action(%__MODULE__{state: {:committing, awaiting_commit_ids}, participants: participants}) do
+    {:commit, participants_for_ids(awaiting_commit_ids, participants)}
   end
 
   def next_action(%__MODULE__{state: :aborted}), do: nil
@@ -105,18 +108,15 @@ defmodule TwoPhaseCommit do
   Moves the transaction to the voting phase.
   """
   @spec prepare(t) :: {:ok, t} | {:error, any()}
-  def prepare(%__MODULE__{state: :interactive, participants: participants} = two_phase_commit) do
-    if MapSet.size(participants) > 1 do
-      {:ok, %__MODULE__{two_phase_commit | state: {:voting, participants}}}
-    else
-      {:error, :too_few_participants}
-    end
+  def prepare(%__MODULE__{state: :interactive, participants: participants} = two_phase_commit) when map_size(participants) > 1 do
+    {:ok, %__MODULE__{two_phase_commit | state: {:voting, participant_ids(two_phase_commit)}}}
   end
 
-  @doc """
-  Moves the transaction to the voting phase. Raises an error when there aren't enough participants.
-  """
-  @spec prepare!(t) :: t | no_return()
+  def prepare(%__MODULE__{state: :interactive}) do
+    {:error, :too_few_participants}
+  end
+
+  @doc false
   def prepare!(%__MODULE__{} = two_phase_commit) do
     case prepare(two_phase_commit) do
       {:ok, two_phase_commit} ->
@@ -130,94 +130,100 @@ defmodule TwoPhaseCommit do
   @doc """
   Records a participant's "prepared" vote, moves to the committing phase when all are prepared.
   """
-  @spec prepared(t, participant) :: t | {:error, :unknown_participant}
+  @spec prepared(t, Participant.t()) :: {:ok, t} | {:error, :unknown_participant}
   # votes that arrive after the we've decided to abort are ignored
   def prepared(%__MODULE__{state: {:rolling_back, _}} = two_phase_commit, participant) do
     with :ok <- known_participant(two_phase_commit, participant) do
-      two_phase_commit
+      {:ok, two_phase_commit}
     end
   end
 
-  def prepared(%__MODULE__{state: {:voting, awaiting_votes}, participants: participants} = two_phase_commit, participant) do
+  def prepared(%__MODULE__{state: {:voting, awaiting_vote_ids}} = two_phase_commit, participant) do
     with :ok <- known_participant(two_phase_commit, participant) do
-      awaiting_votes = MapSet.delete(awaiting_votes, participant)
+      awaiting_vote_ids = MapSet.delete(awaiting_vote_ids, Participant.id(participant))
 
       state =
-        if MapSet.size(awaiting_votes) == 0 do
-          {:committing, participants}
+        if Enum.empty?(awaiting_vote_ids) do
+          {:committing, participant_ids(two_phase_commit)}
         else
-          {:voting, awaiting_votes}
+          {:voting, awaiting_vote_ids}
         end
 
-      %__MODULE__{two_phase_commit | state: state}
+      {:ok, %__MODULE__{two_phase_commit | state: state}}
     end
   end
 
   @doc """
   Records a participant's "abort" vote and moves the transaction to the rolling_back state.
   """
-  @spec aborted(t, participant) :: t | {:error, :unknown_participant}
-  def aborted(%__MODULE__{state: {:voting, awaiting_votes}, participants: participants} = two_phase_commit, participant) do
+  @spec aborted(t, Participant.t()) :: {:ok, t} | {:error, :unknown_participant}
+  def aborted(%__MODULE__{state: {:voting, awaiting_vote_ids}} = two_phase_commit, participant) do
     with :ok <- known_participant(two_phase_commit, participant) do
-      state =
-        if MapSet.member?(awaiting_votes, participant) do
-          {:rolling_back, participants}
-        else
-          raise "participant already voted to commit"
-        end
+      if not MapSet.member?(awaiting_vote_ids, Participant.id(participant)) do
+        raise "participant already voted to commit"
+      end
 
-      %__MODULE__{two_phase_commit | state: state}
+      {:ok, %__MODULE__{two_phase_commit | state: {:rolling_back, participant_ids(two_phase_commit)}}}
     end
   end
 
   def aborted(%__MODULE__{state: {:rolling_back, _awaiting}} = two_phase_commit, _participant) do
-    two_phase_commit
+    {:ok, two_phase_commit}
   end
 
   @doc """
   Notes that a participant has rolled back, moves to the aborted state when all have rolled back.
   """
-  @spec rolled_back(t, participant) :: t | {:error, :unknown_participant}
-  def rolled_back(%__MODULE__{state: {:rolling_back, awaiting_acknowledgment}} = two_phase_commit, participant) do
+  @spec rolled_back(t, Participant.t()) :: {:ok, t} | {:error, :unknown_participant}
+  def rolled_back(%__MODULE__{state: {:rolling_back, awaiting_rolledback_ids}} = two_phase_commit, participant) do
     with :ok <- known_participant(two_phase_commit, participant) do
-      awaiting_acknowledgment = MapSet.delete(awaiting_acknowledgment, participant)
+      awaiting_rolledback_ids = MapSet.delete(awaiting_rolledback_ids, Participant.id(participant))
 
       state =
-        if MapSet.size(awaiting_acknowledgment) == 0 do
+        if Enum.empty?(awaiting_rolledback_ids) do
           :aborted
         else
-          {:rolling_back, awaiting_acknowledgment}
+          {:rolling_back, awaiting_rolledback_ids}
         end
 
-      %__MODULE__{two_phase_commit | state: state}
+      {:ok, %__MODULE__{two_phase_commit | state: state}}
     end
   end
 
   @doc """
   Notes that a participant has committed, moves to the committed state when all have committed.
   """
-  @spec committed(t, participant) :: t | {:error, :unknown_participant}
-  def committed(%__MODULE__{state: {:committing, awaiting_acknowledgement}} = two_phase_commit, participant) do
+  @spec committed(t, Participant.id()) :: {:ok, t} | {:error, :unknown_participant}
+  def committed(%__MODULE__{state: {:committing, awaiting_committed_ids}} = two_phase_commit, participant) do
     with :ok <- known_participant(two_phase_commit, participant) do
-      awaiting_acknowledgement = MapSet.delete(awaiting_acknowledgement, participant)
+      awaiting_committed_ids = MapSet.delete(awaiting_committed_ids, Participant.id(participant))
 
       state =
-        if MapSet.size(awaiting_acknowledgement) == 0 do
+        if Enum.empty?(awaiting_committed_ids) do
           :committed
         else
-          {:committing, awaiting_acknowledgement}
+          {:committing, awaiting_committed_ids}
         end
 
-      %__MODULE__{two_phase_commit | state: state}
+      {:ok, %__MODULE__{two_phase_commit | state: state}}
     end
   end
 
   defp known_participant(%__MODULE__{participants: participants}, participant) do
-    if MapSet.member?(participants, participant) do
+    if Map.has_key?(participants, Participant.id(participant)) do
       :ok
     else
-      # TODO proper error
       {:error, :unknown_participant}
     end
+  end
+
+  defp participant_ids(%__MODULE__{participants: participants}) do
+    participants
+    |> Map.keys()
+    |> MapSet.new()
+  end
+
+  defp participants_for_ids(ids, participants) do
+    Enum.map(ids, &Map.fetch!(participants, &1))
   end
 end
